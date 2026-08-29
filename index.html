@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <title>3D Spider-Man: Realistic Web & Splat Shooter</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; cursor: pointer; }
+        canvas { display: block; }
+        #ui {
+            position: absolute; top: 20px; left: 20px;
+            color: #333; font-family: monospace; font-size: 14px; font-weight: bold;
+            background: rgba(255, 255, 255, 0.9); padding: 10px; border-radius: 5px; z-index: 10;
+            pointer-events: none;
+        }
+        #crosshair {
+            position: absolute; top: 50%; left: 50%;
+            width: 10px; height: 10px; background-color: #ff0000;
+            border: 2px solid white; border-radius: 50%;
+            transform: translate(-50%, -50%); pointer-events: none; z-index: 10;
+            box-shadow: 0 0 10px red;
+        }
+        #start-screen {
+            position: absolute; top: 0; left: 0; width: 100vw; height: 100vh;
+            background: rgba(0,0,0,0.7); color: white; display: flex;
+            align-items: center; justify-content: center; font-family: sans-serif;
+            font-size: 24px; z-index: 20;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+</head>
+<body>
+
+<div id="start-screen">KLIK LAYAR UNTUK MULAI BERAYUN DENGAN KAMERA</div>
+<div id="ui">Status: Menunggu Koneksi Kamera Python...</div>
+<div id="crosshair"></div>
+
+<script>
+    // --- 1. SETUP KONEKSI WEBSOCKET KE PYTHON MEDIAPIPE (DENGAN AUTO-RECONNECT) ---
+    let ws;
+    const ui = document.getElementById('ui');
+
+    let yaw = 0;   
+    let pitch = 0; 
+
+    function connectWebSocket() {
+        ws = new WebSocket('ws://localhost:81');
+
+        ws.onopen = () => {
+            ui.innerText = "Status: Terhubung ke Kamera MediaPipe! Siap Berayun";
+            ui.style.color = "#333";
+        };
+
+        ws.onerror = () => {
+            ui.innerText = "Status: Gagal terhubung (Jalankan script Python dulu)";
+        };
+
+        ws.onclose = () => {
+            ui.innerText = "Status: Koneksi terputus, mencoba menghubungkan ulang...";
+            setTimeout(connectWebSocket, 2000);
+        };
+
+        ws.onmessage = (event) => { 
+            if (event.data === "shoot") {
+                shootAndSwing();
+            } 
+            else if (event.data.startsWith("g:")) {
+                const parts = event.data.split(":");
+                const gyroYaw = parseFloat(parts[1]);
+                const gyroPitch = parseFloat(parts[2]);
+
+                // Mengontrol arah pandang 360 derajat langsung dari data tangan Python
+                yaw = gyroYaw;
+                pitch = gyroPitch;
+                pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch));
+                
+                camera.rotation.y = yaw;
+                camera.rotation.x = pitch;
+            }
+        };
+    }
+
+    connectWebSocket();
+
+    // --- 2. TEKSTUR GEDUNG KACA CERAH ---
+    function generateBrightGlassTexture() {
+        const canvas = document.createElement('canvas');
+        canvas.width = 512; canvas.height = 512;
+        const ctx = canvas.getContext('2d');
+        
+        ctx.fillStyle = '#7ab8e6'; 
+        ctx.fillRect(0, 0, 512, 512);
+        
+        ctx.strokeStyle = '#d9e2ec'; 
+        ctx.lineWidth = 6; 
+        for (let x = 0; x <= 512; x += 32) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 512); ctx.stroke(); }
+        for (let y = 0; y <= 512; y += 64) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(512, y); ctx.stroke(); }
+        
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+        for (let i = 0; i < 60; i++) {
+            ctx.fillRect(Math.floor(Math.random() * 16) * 32, Math.floor(Math.random() * 8) * 64, 32, 64);
+        }
+        
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.wrapS = THREE.RepeatWrapping; texture.wrapT = THREE.RepeatWrapping;
+        return texture;
+    }
+
+    // Generator Tekstur Jaring Laba-Laba Melingkar (Splat) untuk Dinding Gedung
+    function generateWebSplatTexture() {
+        const canvas = document.createElement('canvas');
+        canvas.width = 256; canvas.height = 256;
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, 256, 256);
+
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+        ctx.lineWidth = 3;
+        
+        // Garis lingkar jaring
+        for (let r = 30; r < 120; r += 25) {
+            ctx.beginPath();
+            ctx.arc(128, 128, r, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+        // Garis jari-jari jaring
+        for (let a = 0; a < Math.PI * 2; a += Math.PI / 4) {
+            ctx.beginPath();
+            ctx.moveTo(128, 128);
+            ctx.lineTo(128 + Math.cos(a) * 120, 128 + Math.sin(a) * 120);
+            ctx.stroke();
+        }
+        return new THREE.CanvasTexture(canvas);
+    }
+
+    // --- 3. SETUP DUNIA 3D ---
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0xcce0ff, 0.0015); 
+    scene.background = new THREE.Color(0xcce0ff);
+
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 2000);
+    camera.rotation.order = 'YXZ'; 
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const sunLight = new THREE.DirectionalLight(0xffffff, 1.8);
+    sunLight.position.set(200, 500, 300);
+    scene.add(sunLight);
+    scene.add(new THREE.AmbientLight(0x88aadd, 0.9));
+
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(5000, 5000), new THREE.MeshStandardMaterial({ color: 0x333333 }));
+    ground.rotation.x = -Math.PI / 2;
+    scene.add(ground);
+
+    // --- 4. MEMBANGUN KOTA 360 DERAJAT ---
+    const buildings = [];
+    const material = new THREE.MeshStandardMaterial({ map: generateBrightGlassTexture(), roughness: 0.15, metalness: 0.7 });
+
+    for (let x = -800; x <= 800; x += 60) {
+        for (let z = -800; z <= 800; z += 60) {
+            if (Math.random() > 0.8 || (Math.abs(x) < 40 && Math.abs(z) < 40)) continue; 
+            
+            const height = Math.random() * 150 + 60; 
+            const geometry = new THREE.BoxGeometry(40, height, 40);
+            
+            const geomUvs = geometry.attributes.uv;
+            for (let i = 0; i < geomUvs.count; i++) geomUvs.setY(i, geomUvs.getY(i) * (height / 40));
+
+            const building = new THREE.Mesh(geometry, material);
+            building.position.set(x, height / 2, z);
+            scene.add(building);
+            buildings.push(building);
+        }
+    }
+
+    camera.position.set(0, 100, 0);
+
+    // --- 5. KONTROL 360° & MOUSE BACKUP ---
+    document.addEventListener('click', () => {
+        const startScreen = document.getElementById('start-screen');
+        if (startScreen.style.display !== 'none') {
+            startScreen.style.display = 'none';
+        } else {
+            shootAndSwing(); 
+        }
+    });
+
+    document.addEventListener('mousemove', (event) => {
+        if (document.pointerLockElement === document.body) {
+            yaw -= event.movementX * 0.002;
+            pitch -= event.movementY * 0.002;
+            pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch));
+            camera.rotation.y = yaw;
+            camera.rotation.x = pitch;
+        }
+    });
+
+    // --- 6. LOGIKA TEMBAK, TALI & BENTURAN JARING (RAYCASTER) ---
+    const raycaster = new THREE.Raycaster();
+    let isSwinging = false;
+    let webLine = null;
+    let webSplatMesh = null;
+    const splatTexture = generateWebSplatTexture();
+
+    function shootAndSwing() {
+        if (isSwinging) return;
+
+        raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+        const intersects = raycaster.intersectObjects(buildings);
+
+        if (intersects.length > 0) {
+            isSwinging = true;
+            const hit = intersects[0];
+            const hitPoint = hit.point; 
+            const normal = hit.face.normal.clone(); 
+            normal.transformDirection(hit.object.matrixWorld);
+
+            // A. BUAT EFEK TALI LABA-LABA BERTEKSTUR (Garis tebal menyerupai tali tambang web)
+            const webMaterial = new THREE.LineBasicMaterial({ color: 0xffffff, linewidth: 8 });
+            const webGeometry = new THREE.BufferGeometry().setFromPoints([camera.position, hitPoint]);
+            webLine = new THREE.Line(webGeometry, webMaterial);
+            scene.add(webLine);
+
+            // B. BUAT EFEK JARING LABA-LABA MENEMPEL DI DINDING GEDUNG (Splat)
+            const splatGeo = new THREE.PlaneGeometry(8, 8);
+            const splatMat = new THREE.MeshBasicMaterial({ 
+                map: splatTexture, 
+                transparent: true, 
+                depthWrite: false 
+            });
+            webSplatMesh = new THREE.Mesh(splatGeo, splatMat);
+            
+            // Posisikan jaring tepat di permukaan dinding yang tertembak
+            webSplatMesh.position.copy(hitPoint);
+            webSplatMesh.position.addScaledVector(normal, 0.1); 
+            webSplatMesh.lookAt(hitPoint.clone().add(normal)); 
+            scene.add(webSplatMesh);
+
+            // C. ANIMASI BERAYUN MENUJU GEDUNG
+            gsap.to(camera.position, {
+                x: hitPoint.x,
+                y: hitPoint.y + 10, 
+                z: hitPoint.z + 20, 
+                duration: 1.5,
+                ease: "power2.inOut",
+                onUpdate: () => {
+                    const positions = webLine.geometry.attributes.position.array;
+                    positions[0] = camera.position.x;
+                    positions[1] = camera.position.y - 10;
+                    positions[2] = camera.position.z;
+                    webLine.geometry.attributes.position.needsUpdate = true;
+                },
+                onComplete: () => {
+                    // Hapus tali dan jaring setelah sampai di tujuan
+                    scene.remove(webLine);
+                    scene.remove(webSplatMesh);
+                    isSwinging = false;
+                }
+            });
+        }
+    }
+
+    // --- 7. RENDER LOOP ---
+    function animate() {
+        requestAnimationFrame(animate);
+        renderer.render(scene, camera);
+    }
+    animate();
+
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+</script>
+</body>
+</html>
